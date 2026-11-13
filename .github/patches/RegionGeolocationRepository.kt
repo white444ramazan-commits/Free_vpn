@@ -11,6 +11,11 @@ import io.ktor.client.request.header
 import io.ktor.client.statement.bodyAsText
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
 
@@ -47,6 +52,34 @@ class RegionGeolocationRepository(context: Context) {
             null
         }
     }
+
+    /** Cache a region already supplied by a trusted enriched server directory. */
+    fun cacheLocation(ip: String, region: String, city: String) {
+        val cleanRegion = region.trim()
+        if (cleanRegion.isBlank()) return
+        preferences.edit().putString(
+            ip,
+            JSONObject().put("region", cleanRegion).put("city", city.trim()).toString()
+        ).apply()
+    }
+
+    /**
+     * Pre-resolve regions in background after the directory has been shown.
+     * Bounded concurrency avoids a long serial wait when the user opens a country.
+     */
+    suspend fun prewarm(servers: List<Pair<String, String>>, concurrency: Int = 12) =
+        withContext(Dispatchers.IO) {
+            val pending = servers.distinctBy { it.first }
+                .filter { cachedLocation(it.first) == null }
+            val limiter = Semaphore(concurrency.coerceIn(1, 20))
+            coroutineScope {
+                pending.map { (ip, countryCode) ->
+                    async {
+                        limiter.withPermit { lookup(ip, countryCode) }
+                    }
+                }.awaitAll()
+            }
+        }
 
     suspend fun lookup(ip: String, expectedCountryCode: String): ServerRegion? =
         withContext(Dispatchers.IO) {
