@@ -1,34 +1,48 @@
-# Free VPN (Android)
+# Free VPN for Android
 
-A lightweight Android WireGuard client with a simple server-profile manager.
+Free VPN is an Android client for the public VPN Gate relay directory. It fetches the live server list, groups available relays by country, and lets the user select an OpenVPN profile without manually downloading configuration files.
 
-## Current scope
+## VPN Gate server directory
 
-- Import WireGuard `.conf` profiles from a VPN provider.
-- Validate a profile before saving it in the app's private storage.
-- Connect and disconnect through Android's VPN permission dialog.
-- Build a debug APK automatically with GitHub Actions.
+The app reads the public CSV endpoint maintained by VPN Gate:
 
-This repository does not include VPN servers, private keys, or a bundled provider. A VPN app is only a client: each location needs a real WireGuard server and a valid client configuration issued by its operator. The app lists locations represented by imported profiles; it does not claim that every country is available.
+- API: https://www.vpngate.net/api/iphone/
+- Project: https://www.vpngate.net/en/
+- VPN Gate is an academic experiment operated by the University of Tsukuba and uses volunteer-run public relays.
+
+The directory is dynamic. Countries and servers shown in the app are only those currently returned by the upstream API with an OpenVPN configuration. The app does not claim permanent availability or coverage in every country.
+
+## OpenVPN engine requirement
+
+The current app uses the documented AIDL control API of **OpenVPN for Android** (package `de.blinkt.openvpn`) as its OpenVPN engine. Install that free client once from Google Play:
+
+https://play.google.com/store/apps/details?id=de.blinkt.openvpn
+
+After it is installed, Free VPN can ask it to start the selected inline VPN Gate profile and request the normal Android VPN permission. The OpenVPN engine runs the tunnel; Free VPN provides the server directory and selection UI.
+
+This integration uses the public external-app API documented by the OpenVPN for Android project. The API is not the same as bundling the OpenVPN engine into this APK.
+
+## Privacy and safety
+
+VPN Gate relays are operated by volunteers, not by this app. Relay operators may observe traffic metadata and may apply their own logging policy. Never use an unknown public relay for sensitive accounts, banking, or traffic that you would not trust on an open network. Prefer HTTPS even while connected. A server's presence in the directory does not guarantee that it is reachable from your network or that its advertised speed is current.
+
+The app downloads the directory over HTTPS, caches the last successful response, and does not upload user traffic or private keys.
 
 ## Build
 
-GitHub Actions builds `app-debug.apk` on each push. Open the repository's **Actions** tab, select the latest **Android APK** run, and download the `free-vpn-debug-apk` artifact.
+GitHub Actions builds `app-debug.apk` on every push to `main`.
 
-For local builds, use JDK 17 and Gradle 8.13:
+- JDK 17
+- Gradle 8.13
+- Android Gradle Plugin 8.13.2
+- Kotlin 2.2.20
+
+Build locally with:
 
 ```sh
 gradle assembleDebug
 ```
 
-## Import a server
+## Attribution
 
-In the app, tap **Add configuration** and select a WireGuard `.conf` file supplied by your VPN provider. Then select the profile and tap **Connect**. The first connection requires Android's VPN permission.
-
-Only import configurations from providers you trust. The operator of the selected VPN server can observe traffic metadata and may be able to inspect unencrypted traffic. Use HTTPS and review the provider's privacy policy.
-
-## Technology
-
-- Kotlin / Android SDK
-- Official WireGuard Android tunnel library
-- Android `VpnService`
+The AIDL interface follows the public OpenVPN for Android external control API and its Apache-2.0-licensed remote example. See https://github.com/schwabe/ics-openvpn. VPN Gate server metadata and OpenVPN configurations are supplied by https://www.vpngate.net/.
