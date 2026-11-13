@@ -30,36 +30,18 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-
-          # Use the existing Free VPN package id so Android recognises it as
-          # the next app generation after the earlier prototype.
-          find app/src -type f \\( -name '*.kt' -o -name '*.java' \\) -print0 |
-            xargs -0 -r sed -i 's/com\\.payaq\\.opengatevpn/com.freevpn.client/g'
-
-          sed -i \\
-            -e 's/namespace = "com.payaq.opengatevpn"/namespace = "com.freevpn.client"/' \\
-            -e 's/applicationId = "com.payaq.opengatevpn"/applicationId = "com.freevpn.client"/' \\
-            -e 's/versionCode = 1/versionCode = 3/' \\
-            -e 's/versionName = "1.2.0"/versionName = "3.0.0"/' \\
-            app/build.gradle.kts
-
-          sed -i 's#<string name="app_name">OpenGate VPN</string>#<string name="app_name">Free VPN</string>#' \\
-            app/src/main/res/values/strings.xml
-
-          sed -i \\
-            -e 's/text = "OpenGate"/text = "Free VPN"/' \\
-            -e 's/contentDescription = "OpenGate VPN Logo"/contentDescription = "Free VPN logo"/' \\
-            app/src/main/java/com/payaq/opengatevpn/ui/main/MainScreen.kt
-
-          sed -i \\
-            -e 's/OpenGate could not/Free VPN could not/g' \\
-            -e 's/OpenGate needs/Free VPN needs/g' \\
-            app/src/main/java/com/payaq/opengatevpn/ui/main/VpnViewModel.kt
-
-          sed -i \\
-            -e 's/opengate@terminal/freevpn@terminal/g' \\
-            -e 's/opengate:~#/freevpn:~#/g' \\
-            app/src/main/java/com/payaq/opengatevpn/ui/main/LogsTab.kt
+          grep -rl 'com.payaq.opengatevpn' app/src | xargs -r sed -i 's/com.payaq.opengatevpn/com.freevpn.client/g'
+          sed -i 's/namespace = "com.payaq.opengatevpn"/namespace = "com.freevpn.client"/' app/build.gradle.kts
+          sed -i 's/applicationId = "com.payaq.opengatevpn"/applicationId = "com.freevpn.client"/' app/build.gradle.kts
+          sed -i 's/versionCode = 1/versionCode = 3/' app/build.gradle.kts
+          sed -i 's/versionName = "1.2.0"/versionName = "3.0.0"/' app/build.gradle.kts
+          sed -i 's#<string name="app_name">OpenGate VPN</string>#<string name="app_name">Free VPN</string>#' app/src/main/res/values/strings.xml
+          sed -i 's/text = "OpenGate"/text = "Free VPN"/' app/src/main/java/com/payaq/opengatevpn/ui/main/MainScreen.kt
+          sed -i 's/contentDescription = "OpenGate VPN Logo"/contentDescription = "Free VPN logo"/' app/src/main/java/com/payaq/opengatevpn/ui/main/MainScreen.kt
+          sed -i 's/OpenGate could not/Free VPN could not/g' app/src/main/java/com/payaq/opengatevpn/ui/main/VpnViewModel.kt
+          sed -i 's/OpenGate needs/Free VPN needs/g' app/src/main/java/com/payaq/opengatevpn/ui/main/VpnViewModel.kt
+          sed -i 's/opengate@terminal/freevpn@terminal/g' app/src/main/java/com/payaq/opengatevpn/ui/main/LogsTab.kt
+          sed -i 's/opengate:~#/freevpn:~#/g' app/src/main/java/com/payaq/opengatevpn/ui/main/LogsTab.kt
 
       - name: Build standalone APK with the OpenVPN engine embedded
         working-directory: standalone-vpn
