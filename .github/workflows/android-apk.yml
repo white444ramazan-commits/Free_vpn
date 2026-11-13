@@ -33,8 +33,8 @@ jobs:
           grep -rl 'com.payaq.opengatevpn' app/src | xargs -r sed -i 's/com.payaq.opengatevpn/com.freevpn.client/g'
           sed -i 's/namespace = "com.payaq.opengatevpn"/namespace = "com.freevpn.client"/' app/build.gradle.kts
           sed -i 's/applicationId = "com.payaq.opengatevpn"/applicationId = "com.freevpn.client"/' app/build.gradle.kts
-          sed -i 's/versionCode = 1/versionCode = 3/' app/build.gradle.kts
-          sed -i 's/versionName = "1.2.0"/versionName = "3.0.0"/' app/build.gradle.kts
+          sed -i 's/versionCode = 1/versionCode = 4/' app/build.gradle.kts
+          sed -i 's/versionName = "1.2.0"/versionName = "3.1.0"/' app/build.gradle.kts
           sed -i 's#<string name="app_name">OpenGate VPN</string>#<string name="app_name">Free VPN</string>#' app/src/main/res/values/strings.xml
           sed -i 's/text = "OpenGate"/text = "Free VPN"/' app/src/main/java/com/payaq/opengatevpn/ui/main/MainScreen.kt
           sed -i 's/contentDescription = "OpenGate VPN Logo"/contentDescription = "Free VPN logo"/' app/src/main/java/com/payaq/opengatevpn/ui/main/MainScreen.kt
@@ -42,6 +42,13 @@ jobs:
           sed -i 's/OpenGate needs/Free VPN needs/g' app/src/main/java/com/payaq/opengatevpn/ui/main/VpnViewModel.kt
           sed -i 's/opengate@terminal/freevpn@terminal/g' app/src/main/java/com/payaq/opengatevpn/ui/main/LogsTab.kt
           sed -i 's/opengate:~#/freevpn:~#/g' app/src/main/java/com/payaq/opengatevpn/ui/main/LogsTab.kt
+
+      - name: Apply resilient VPN Gate directory loader
+        working-directory: standalone-vpn
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp ../.github/patches/VpnGateApi.kt app/src/main/java/com/payaq/opengatevpn/data/remote/VpnGateApi.kt
 
       - name: Build standalone APK with the OpenVPN engine embedded
         working-directory: standalone-vpn
