@@ -45,7 +45,7 @@ jobs:
 
       - name: Build standalone APK with the OpenVPN engine embedded
         working-directory: standalone-vpn
-        run: ./gradlew --no-daemon --stacktrace assembleDebug
+        run: chmod +x ./gradlew && ./gradlew --no-daemon --stacktrace assembleDebug
 
       - name: Upload standalone APK
         uses: actions/upload-artifact@v4
