@@ -622,6 +622,7 @@ private fun AdvancedServerCard(
     // Sub-15ms reports are physically implausible for an internet relay — treat
     // them as suspect data, not as a great latency.
     val pingColor = when {
+        server.ping <= 0 -> TextMuted
         server.ping < 15 -> Color(0xFFFFB300)
         server.ping < 60 -> Color(0xFF00E676)
         server.ping < 120 -> Color(0xFF00E5FF)
@@ -678,6 +679,30 @@ private fun AdvancedServerCard(
                         overflow = TextOverflow.Ellipsis,
                         modifier = Modifier.weight(1f, fill = false)
                     )
+                    if (server.provider != "VPN Gate") {
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = server.provider.uppercase(),
+                            style = LabelCaps.copy(fontSize = 7.sp, fontWeight = FontWeight.Bold),
+                            color = Color(0xFF80CBC4),
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(50))
+                                .background(Color(0xFF80CBC4).copy(alpha = 0.10f))
+                                .padding(horizontal = 5.dp, vertical = 2.dp)
+                        )
+                    }
+                    if (server.availability == "recent") {
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = "RECENTLY SEEN",
+                            style = LabelCaps.copy(fontSize = 7.sp, fontWeight = FontWeight.Bold),
+                            color = Color(0xFFFFB74D),
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(50))
+                                .background(Color(0xFFFFB74D).copy(alpha = 0.10f))
+                                .padding(horizontal = 5.dp, vertical = 2.dp)
+                        )
+                    }
                     if (server.isResidential) {
                         Spacer(modifier = Modifier.width(6.dp))
                         Text(
@@ -802,7 +827,7 @@ private fun AdvancedServerCard(
                     color = TextMuted
                 )
                 Text(
-                    text = "${server.numVpnSessions}",
+                    text = if (server.numVpnSessions < 0) "—" else "${server.numVpnSessions}",
                     style = TechnicalData.copy(fontSize = 11.sp),
                     color = TextMuted
                 )
