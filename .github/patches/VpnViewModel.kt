@@ -211,11 +211,6 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
         displayServers.groupingBy { it.countryLong }.eachCount()
     }
 
-    /** Country → server count for display badges. */
-    val countryServerCounts by derivedStateOf {
-        displayServers.groupingBy { it.countryLong }.eachCount()
-    }
-
     /**
      * Resolve approximate regions lazily when a country is opened. The IP database
      * is only a geographic estimate; its results are cached locally and reused.
