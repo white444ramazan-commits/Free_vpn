@@ -131,7 +131,7 @@ private fun calculateResidentialScore(
         else -> -0.15
     }
     points += when {
-        numVpnSessions in 1..8 -> 0.15
+        numVpnSessions in 1L..8L -> 0.15
         numVpnSessions < 0 -> 0.0
         numVpnSessions <= 25 -> 0.05
         numVpnSessions > 60 -> -0.15
