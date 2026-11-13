@@ -23,6 +23,9 @@ import com.freevpn.client.data.vpn.VpnManager
 import de.blinkt.openvpn.core.ConnectionStatus
 import de.blinkt.openvpn.core.VpnStatus
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
@@ -237,15 +240,26 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
 
         regionLookupCountry = country
         regionLookupJob = viewModelScope.launch {
-            unresolved.forEachIndexed { index, server ->
-                val location = regionRepository.lookup(server.ip, server.countryShort)
-                if (location != null) {
-                    regionLocations = regionLocations + (server.ip to location)
+            try {
+                // Small batches keep lookup traffic polite while avoiding one request at a time.
+                unresolved.chunked(3).forEach { batch ->
+                    val results = coroutineScope {
+                        batch.map { server ->
+                            async {
+                                server to regionRepository.lookup(server.ip, server.countryShort)
+                            }
+                        }.awaitAll()
+                    }
+                    val completed = results.associate { (server, location) ->
+                        server.ip to (location ?: ServerRegion("Location unavailable", ""))
+                    }
+                    regionLocations = regionLocations + completed
+                    regionLookupProgress += batch.size
+                    if (batch != unresolved.chunked(3).last()) delay(300L)
                 }
-                regionLookupProgress++
-                if (index < unresolved.lastIndex) delay(250L)
+            } finally {
+                if (regionLookupCountry == country) regionLookupCountry = null
             }
-            regionLookupCountry = null
         }
     }
 
