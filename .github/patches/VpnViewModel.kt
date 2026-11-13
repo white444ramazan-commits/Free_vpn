@@ -66,7 +66,7 @@ data class LogEntry(
 
 class VpnViewModel(application: Application) : AndroidViewModel(application) {
 
-    private val repository = VpnRepository()
+    private val repository = VpnRepository(application)
     private val regionRepository = RegionGeolocationRepository(application)
     val vpnManager = VpnManager(application)
 
@@ -145,6 +145,7 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
     var regionLookupTotal by mutableIntStateOf(0)
         private set
     private var regionLookupJob: Job? = null
+    private var regionWarmupJob: Job? = null
 
     /** Once connected, keep retrying the selected relay until the user stops it. */
     private var autoReconnectAfterDrop = false
@@ -656,66 +657,103 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
 
     fun loadServers() {
         val gen = ++loadGeneration
-        loadJob?.cancel() // never let two fetches race; stale results are discarded below
+        loadJob?.cancel()
         loadJob = viewModelScope.launch {
-            val isTunnelActive = (connectionState == ConnectionState.CONNECTED ||
-                    connectionState == ConnectionState.CONNECTING ||
-                    connectionState == ConnectionState.RECONNECTING ||
-                    connectionState == ConnectionState.PAUSED)
-            val isColdStart = (selectedServer == null)
+            val isTunnelActive = connectionState in listOf(
+                ConnectionState.CONNECTED,
+                ConnectionState.CONNECTING,
+                ConnectionState.RECONNECTING,
+                ConnectionState.PAUSED
+            )
+            val coldStart = selectedServer == null && displayServers.isEmpty()
 
-            if (!isTunnelActive && connectionState != ConnectionState.ERROR &&
+            if (!isTunnelActive && displayServers.isEmpty() &&
+                connectionState != ConnectionState.ERROR &&
                 connectionState != ConnectionState.DISCONNECTED
             ) {
-                transitionTo(ConnectionState.SEARCHING_NODES, "refreshing directory")
+                transitionTo(ConnectionState.SEARCHING_NODES, "loading saved directory")
             }
-            addLog("FETCH", "Querying VPN Gate public directory...")
+
+            // First paint: show the previous successful directory without waiting for
+            // any network request. This also restores server configs after process death.
+            if (displayServers.isEmpty()) {
+                when (val cached = repository.getCachedServers()) {
+                    is VpnGateResult.Success -> {
+                        if (gen != loadGeneration) return@launch
+                        applyFetchedServers(cached, 0L, isTunnelActive)
+                        addLog("CACHE", "Restored ${cached.servers.size} saved VPN profiles instantly.")
+                    }
+                    else -> Unit
+                }
+            }
 
             isRefreshing = true
+            addLog("FETCH", "Refreshing VPN Gate and supplemental OpenVPN directories...")
+
             try {
-                val startTime = System.currentTimeMillis()
-                val result = repository.getServers()
-                val fetchDurationMs = System.currentTimeMillis() - startTime
+                val startedAt = System.currentTimeMillis()
+                when (val primary = repository.getServers()) {
+                    is VpnGateResult.Success -> {
+                        if (gen != loadGeneration) return@launch
+                        val primaryDuration = System.currentTimeMillis() - startedAt
+                        applyFetchedServers(primary, primaryDuration, isTunnelActive)
+                        isRefreshing = false
 
-                // For cold start, allow at least 1200ms so the vector splash animation is smooth
-                if (isColdStart) {
-                    val elapsed = System.currentTimeMillis() - startTime
-                    if (elapsed < 1200L) delay(1200L - elapsed)
-                }
+                        // Show the primary feed now, then fill in extra countries/profiles
+                        // in the background. The visible list is never blocked by this step.
+                        val supplementStartedAt = System.currentTimeMillis()
+                        when (val merged = repository.mergeSupplementalServers(primary.servers)) {
+                            is VpnGateResult.Success -> {
+                                if (gen != loadGeneration) return@launch
+                                applyFetchedServers(
+                                    merged,
+                                    System.currentTimeMillis() - supplementStartedAt,
+                                    isTunnelActive
+                                )
+                                addLog(
+                                    "READY",
+                                    "Combined directory: ${merged.servers.size} unique profiles from multiple sources."
+                                )
+                            }
+                            is VpnGateResult.EmptyFeed,
+                            is VpnGateResult.NetworkError -> {
+                                // Keep the already-rendered primary directory; an optional
+                                // source failing must never blank or block the working list.
+                                addLog("INFO", "Supplementary feeds unavailable; VPN Gate list remains usable.")
+                            }
+                        }
+                    }
 
-                if (gen != loadGeneration) return@launch // a newer refresh superseded this one
-                isRefreshing = false
-
-                when (result) {
-                    is VpnGateResult.Success -> applyFetchedServers(result, fetchDurationMs, isTunnelActive)
                     is VpnGateResult.EmptyFeed -> {
-                        lastLoadError = "Directory reachable but contained no usable servers"
-                        if (!isTunnelActive && connectionState == ConnectionState.SEARCHING_NODES) {
-                            transitionTo(ConnectionState.ERROR, "empty directory feed")
-                        }
-                        addLog(
-                            "ERROR",
-                            "Directory answered in ${fetchDurationMs}ms but contained 0 usable OpenVPN nodes. Try refreshing."
-                        )
-                    }
-                    is VpnGateResult.NetworkError -> {
-                        lastLoadError = "Could not reach vpngate.net — check internet connectivity"
-                        if (!isTunnelActive && connectionState == ConnectionState.SEARCHING_NODES) {
-                            transitionTo(ConnectionState.ERROR, "directory fetch failed")
-                        }
-                        val causeDesc = result.cause?.let { " (${it.javaClass.simpleName})" } ?: ""
-                        if (isTunnelActive) {
-                            addLog("ERROR", "Refresh failed$causeDesc after ${fetchDurationMs}ms — tunnel unaffected.")
+                        if (displayServers.isEmpty()) {
+                            lastLoadError = "Directory returned no usable OpenVPN profiles"
+                            if (!isTunnelActive) transitionTo(ConnectionState.ERROR, "empty directory feed")
                         } else {
-                            addLog(
-                                "ERROR",
-                                "API request failed$causeDesc after ${fetchDurationMs}ms. Check internet connectivity, then refresh."
-                            )
+                            addLog("INFO", "Network refresh returned no rows; showing saved server list.")
+                        }
+                    }
+
+                    is VpnGateResult.NetworkError -> {
+                        val detail = primary.cause?.javaClass?.simpleName ?: "network error"
+                        if (displayServers.isEmpty()) {
+                            lastLoadError = "Could not reach VPN directory sources ($detail)"
+                            if (!isTunnelActive) transitionTo(ConnectionState.ERROR, "directory fetch failed")
+                        } else {
+                            addLog("INFO", "Directory refresh failed ($detail); saved servers remain available.")
                         }
                     }
                 }
-
                 reconcileWithRunningService()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.e("FreeVPN_Directory", "Directory refresh failed", e)
+                if (displayServers.isEmpty()) {
+                    lastLoadError = e.message ?: "Could not load VPN directory"
+                    if (!isTunnelActive) transitionTo(ConnectionState.ERROR, "directory refresh failed")
+                } else {
+                    addLog("INFO", "Refresh failed; keeping cached server list.")
+                }
             } finally {
                 if (gen == loadGeneration) isRefreshing = false
             }
@@ -731,10 +769,46 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
         val fetched = result.servers
         fullServers = fetched.distinctBy { it.ip } // defensive: LazyColumn keys are IPs
         serverLookup = fullServers.associateBy { it.ip }
+
+        // Some supplemental sources already include GeoIP. Seed it locally so
+        // country → region opens without waiting for a network lookup.
+        fullServers.forEach { server ->
+            if (server.regionName.isNotBlank()) {
+                regionRepository.cacheLocation(server.ip, server.regionName, server.cityName)
+            }
+        }
         regionLocations = fullServers.mapNotNull { server ->
-            regionRepository.cachedLocation(server.ip)?.let { server.ip to it }
+            val inline = server.regionName.takeIf { it.isNotBlank() }?.let {
+                ServerRegion(it, server.cityName)
+            }
+            val location = inline ?: regionRepository.cachedLocation(server.ip)
+            location?.let { server.ip to it }
         }.toMap()
         displayServers = fullServers.map { it.toDisplay() }
+
+        // Persist complete configs so the next launch paints the list immediately.
+        viewModelScope.launch {
+            runCatching { repository.saveCachedServers(fullServers) }
+                .onFailure { Log.w("FreeVPN_Directory", "Could not save directory cache", it) }
+        }
+
+        // Start GeoIP enrichment after first paint. Cached locations and inline
+        // MaxMind data are ready now; the remaining lookups warm future country screens.
+        regionWarmupJob?.cancel()
+        val pendingLocations = fullServers
+            .filter { regionLocations[it.ip] == null }
+            .map { it.ip to it.countryShort }
+        if (pendingLocations.isNotEmpty()) {
+            regionWarmupJob = viewModelScope.launch {
+                runCatching { regionRepository.prewarm(pendingLocations, concurrency = 12) }
+                    .onFailure { Log.w("FreeVPN_Geo", "Background region prewarm failed", it) }
+                if (pendingLocations.isNotEmpty()) {
+                    regionLocations = fullServers.mapNotNull { server ->
+                        regionRepository.cachedLocation(server.ip)?.let { server.ip to it }
+                    }.toMap() + regionLocations
+                }
+            }
+        }
 
         val currentActiveIp = selectedServer?.ip
         val currentInFetched = currentActiveIp?.let { serverLookup[it] }
