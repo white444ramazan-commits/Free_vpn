@@ -48,7 +48,7 @@ class VpnManager(private val context: Context) {
             // Replace short fail-fast/idle-exit options supplied by a relay config.
             val preservedLines = originalConfig.lineSequence().filterNot { line ->
                 val trimmed = line.trimStart()
-                val directive = trimmed.substringBefore(Regex("\\s")).lowercase(Locale.ROOT)
+                val directive = trimmed.split(Regex("\\s+"), limit = 2).firstOrNull()?.lowercase(Locale.ROOT).orEmpty()
                 directive in replacedDirectives
             }.toList()
 
