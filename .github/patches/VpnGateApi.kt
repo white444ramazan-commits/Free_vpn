@@ -73,20 +73,47 @@ class VpnGateApi(context: Context) {
     private val meridianSnapshot =
         "https://raw.githubusercontent.com/6Kmfi6HP/vpngate-meridian/gh-pages/json/data.maxmind.json"
 
-    private val countryCodes = mapOf(
-        "Japan" to "JP", "Korea Republic of" to "KR", "Russian Federation" to "RU",
-        "Thailand" to "TH", "United States" to "US", "United States of America" to "US",
-        "Viet Nam" to "VN", "Vietnam" to "VN", "Romania" to "RO", "Argentina" to "AR",
-        "China" to "CN", "Mexico" to "MX", "Indonesia" to "ID", "India" to "IN",
-        "Ukraine" to "UA", "United Arab Emirates" to "AE", "Croatia" to "HR",
-        "Croatia (LOCAL Name: Hrvatska)" to "HR", "Canada" to "CA", "United Kingdom" to "GB",
-        "Taiwan" to "TW", "Belarus" to "BY", "Peru" to "PE", "Malaysia" to "MY",
-        "Brazil" to "BR", "France" to "FR", "Germany" to "DE", "Netherlands" to "NL",
-        "Italy" to "IT", "Spain" to "ES", "Portugal" to "PT", "Latvia" to "LV",
-        "Venezuela" to "VE", "Philippines" to "PH", "Myanmar" to "MM", "Sweden" to "SE",
-        "Finland" to "FI", "Poland" to "PL", "Turkey" to "TR", "Türkiye" to "TR",
-        "South Africa" to "ZA", "Australia" to "AU", "Singapore" to "SG", "Hong Kong" to "HK"
-    )
+    // Build the country index from ISO-3166 instead of a short hand-maintained
+    // list. This prevents valid Auto-OVPN entries from being silently discarded.
+    private val countryCodes: Map<String, String> = buildMap {
+        Locale.getISOCountries().forEach { code ->
+            val englishName = Locale("", code).getDisplayCountry(Locale.ENGLISH).trim()
+            if (englishName.isNotBlank()) put(englishName, code)
+        }
+        putAll(
+            mapOf(
+                "Japan" to "JP",
+                "Korea Republic of" to "KR",
+                "Republic of Korea" to "KR",
+                "South Korea" to "KR",
+                "Russian Federation" to "RU",
+                "United States" to "US",
+                "United States of America" to "US",
+                "USA" to "US",
+                "United Kingdom" to "GB",
+                "UK" to "GB",
+                "Viet Nam" to "VN",
+                "Vietnam" to "VN",
+                "Türkiye" to "TR",
+                "Turkey" to "TR",
+                "Taiwan" to "TW",
+                "Hong Kong" to "HK",
+                "Moldova" to "MD",
+                "Bolivia" to "BO",
+                "Brunei" to "BN",
+                "Iran" to "IR",
+                "Syria" to "SY",
+                "Tanzania" to "TZ",
+                "Venezuela" to "VE",
+                "Laos" to "LA",
+                "Czech Republic" to "CZ",
+                "Czechia" to "CZ",
+                "Ivory Coast" to "CI",
+                "Cote d'Ivoire" to "CI",
+                "Palestine" to "PS"
+            )
+        )
+    }
 
     suspend fun loadCachedServers(): VpnGateResult = withContext(Dispatchers.IO) {
         runCatching { readServerFile(cacheFile) }
