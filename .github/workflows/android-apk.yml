@@ -50,6 +50,14 @@ jobs:
           set -euo pipefail
           cp ../.github/patches/VpnGateApi.kt app/src/main/java/com/payaq/opengatevpn/data/remote/VpnGateApi.kt
 
+      - name: Apply country-first server browser
+        working-directory: standalone-vpn
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp ../.github/patches/ServersTab.kt app/src/main/java/com/payaq/opengatevpn/ui/main/ServersTab.kt
+          sed -i 's/server.ip.contains(query, ignoreCase = true)/server.ip.contains(query, ignoreCase = true) || server.hostName.contains(query, ignoreCase = true)/' app/src/main/java/com/payaq/opengatevpn/ui/main/VpnViewModel.kt
+
       - name: Build standalone APK with the OpenVPN engine embedded
         working-directory: standalone-vpn
         run: chmod +x ./gradlew && ./gradlew --no-daemon --stacktrace assembleDebug
