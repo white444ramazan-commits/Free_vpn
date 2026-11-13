@@ -3,6 +3,7 @@ package com.freevpn.client.ui.main
 import android.app.Application
 import android.os.Handler
 import android.os.Looper
+import android.util.Log
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
@@ -22,6 +23,7 @@ import com.freevpn.client.data.repository.VpnRepository
 import com.freevpn.client.data.vpn.VpnManager
 import de.blinkt.openvpn.core.ConnectionStatus
 import de.blinkt.openvpn.core.VpnStatus
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -237,8 +239,9 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
         regionLookupCountry = country
         regionLookupJob = viewModelScope.launch {
             try {
-                // Small batches keep lookup traffic polite while avoiding one request at a time.
-                unresolved.chunked(3).forEach { batch ->
+                // Resolve small parallel batches. The region screen is already visible
+                // with cached/inline locations while any unresolved IPs are enriched.
+                unresolved.chunked(12).forEach { batch ->
                     val results = coroutineScope {
                         batch.map { server ->
                             async {
@@ -246,12 +249,11 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
                             }
                         }.awaitAll()
                     }
-                    val completed = results.associate { (server, location) ->
-                        server.ip to (location ?: ServerRegion("Location unavailable", ""))
-                    }
+                    val completed = results.mapNotNull { (server, location) ->
+                        location?.let { server.ip to it }
+                    }.toMap()
                     regionLocations = regionLocations + completed
                     regionLookupProgress += batch.size
-                    if (batch != unresolved.chunked(3).last()) delay(300L)
                 }
             } finally {
                 if (regionLookupCountry == country) regionLookupCountry = null
@@ -665,7 +667,6 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
                 ConnectionState.RECONNECTING,
                 ConnectionState.PAUSED
             )
-            val coldStart = selectedServer == null && displayServers.isEmpty()
 
             if (!isTunnelActive && displayServers.isEmpty() &&
                 connectionState != ConnectionState.ERROR &&
