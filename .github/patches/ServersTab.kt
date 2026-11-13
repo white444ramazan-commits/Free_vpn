@@ -62,7 +62,7 @@ import com.freevpn.client.ui.util.formatScore
 import com.freevpn.client.ui.util.formatSpeed
 
 
-// ── Servers Tab Content ─────────────────────────────────────────────────────────
+// ── Countries → Regions → Servers ───────────────────────────────────────────────
 
 private data class CountrySummary(
     val name: String,
@@ -70,7 +70,12 @@ private data class CountrySummary(
     val serverCount: Int
 )
 
-// ── Countries → regional server directory ───────────────────────────────────────
+private data class RegionSummary(
+    val name: String,
+    val citySummary: String,
+    val serverCount: Int,
+    val unavailable: Boolean = false
+)
 
 @Composable
 fun ServersTabContent(
@@ -79,36 +84,82 @@ fun ServersTabContent(
 ) {
     val listState = rememberLazyListState()
     val selectedCountry = viewModel.selectedCountryFilter
+    val selectedRegion = viewModel.selectedRegionFilter
     val query = viewModel.searchQuery.trim()
+    val isCountriesPage = selectedCountry == null
+    val isRegionsPage = selectedCountry != null && selectedRegion == null
+
+    LaunchedEffect(selectedCountry, selectedRegion) {
+        listState.scrollToItem(0)
+        if (selectedCountry != null) {
+            viewModel.loadRegionsForCountry(selectedCountry)
+        } else {
+            viewModel.cancelRegionLookups()
+        }
+    }
 
     val countrySummaries = remember(viewModel.displayServers, query) {
         viewModel.displayServers
             .groupBy { it.countryLong }
             .mapNotNull { (name, servers) ->
                 val first = servers.firstOrNull() ?: return@mapNotNull null
-                CountrySummary(
-                    name = name,
-                    code = first.countryShort,
-                    serverCount = servers.size
-                )
+                CountrySummary(name, first.countryShort, servers.size)
             }
-            .filter { country ->
+            .filter {
                 query.isBlank() ||
-                    country.name.contains(query, ignoreCase = true) ||
-                    country.code.contains(query, ignoreCase = true)
+                    it.name.contains(query, ignoreCase = true) ||
+                    it.code.contains(query, ignoreCase = true)
             }
             .sortedBy { it.name.lowercase() }
     }
 
-    // Scroll to top whenever the user changes country, search, sorting or the feed.
-    LaunchedEffect(
-        viewModel.activeSort,
-        selectedCountry,
-        viewModel.residentialOnly,
-        query,
-        viewModel.displayServers
+    val countryServers = remember(viewModel.displayServers, selectedCountry) {
+        if (selectedCountry == null) emptyList()
+        else viewModel.displayServers.filter { it.countryLong == selectedCountry }
+    }
+
+    val regionSummaries = remember(
+        countryServers,
+        viewModel.regionLocations,
+        viewModel.regionLookupCountry,
+        query
     ) {
-        listState.scrollToItem(0)
+        val groups = countryServers.groupBy { server ->
+            viewModel.regionLocations[server.ip]?.region?.takeIf { it.isNotBlank() }
+                ?: "Location unavailable"
+        }
+        groups.map { (regionName, servers) ->
+            val cities = servers.mapNotNull { server ->
+                viewModel.regionLocations[server.ip]?.city?.takeIf { it.isNotBlank() }
+            }.distinct().take(3).joinToString(" · ")
+            RegionSummary(
+                name = regionName,
+                citySummary = cities.ifBlank {
+                    if (regionName == "Location unavailable") {
+                        "IP location could not be determined"
+                    } else {
+                        "Regional server locations"
+                    }
+                },
+                serverCount = servers.size,
+                unavailable = regionName == "Location unavailable"
+            )
+        }
+            .filter {
+                query.isBlank() ||
+                    it.name.contains(query, ignoreCase = true) ||
+                    it.citySummary.contains(query, ignoreCase = true)
+            }
+            .sortedWith(compareBy<RegionSummary> { it.unavailable }.thenBy { it.name.lowercase() })
+    }
+
+    val knownRegionCount = regionSummaries.count { !it.unavailable }
+    val isLookingUp = selectedCountry != null &&
+        viewModel.regionLookupCountry == selectedCountry
+    val unresolvedCount = if (isLookingUp) {
+        (viewModel.regionLookupTotal - viewModel.regionLookupProgress).coerceAtLeast(0)
+    } else {
+        0
     }
 
     Column(
@@ -116,7 +167,7 @@ fun ServersTabContent(
             .fillMaxSize()
             .padding(horizontal = 16.dp)
     ) {
-        if (selectedCountry == null) {
+        if (isCountriesPage) {
             Text(
                 text = "Countries",
                 style = MaterialTheme.typography.headlineMedium.copy(
@@ -136,7 +187,7 @@ fun ServersTabContent(
                         .background(StatusSuccess)
                 )
                 Text(
-                    text = "${viewModel.availableCountries.size} countries · ${viewModel.displayServers.size} regional servers",
+                    text = "${countrySummaries.size} countries · ${viewModel.displayServers.size} servers",
                     style = TechnicalData,
                     color = TextMuted
                 )
@@ -154,14 +205,20 @@ fun ServersTabContent(
                         .clip(RoundedCornerShape(9.dp))
                         .background(Color(0xFF171717))
                         .clickable {
-                            viewModel.selectedCountryFilter = null
+                            if (selectedRegion != null) {
+                                viewModel.selectedRegionFilter = null
+                            } else {
+                                viewModel.selectedCountryFilter = null
+                                viewModel.selectedRegionFilter = null
+                                viewModel.cancelRegionLookups()
+                            }
                             viewModel.searchQuery = ""
                         },
                     contentAlignment = Alignment.Center
                 ) {
                     Icon(
                         imageVector = Icons.Rounded.ArrowBack,
-                        contentDescription = "Back to countries",
+                        contentDescription = if (isRegionsPage) "Back to countries" else "Back to regions",
                         tint = Primary,
                         modifier = Modifier.size(21.dp)
                     )
@@ -169,7 +226,7 @@ fun ServersTabContent(
                 Spacer(modifier = Modifier.width(10.dp))
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
-                        text = selectedCountry,
+                        text = if (isRegionsPage) selectedCountry.orEmpty() else selectedRegion.orEmpty(),
                         style = MaterialTheme.typography.headlineSmall.copy(
                             fontWeight = FontWeight.Bold,
                             letterSpacing = (-0.4).sp
@@ -178,7 +235,11 @@ fun ServersTabContent(
                         maxLines = 1
                     )
                     Text(
-                        text = "${viewModel.countryServerCounts[selectedCountry] ?: 0} regional servers available",
+                        text = if (isRegionsPage) {
+                            "${knownRegionCount} regions identified · ${countryServers.size} servers"
+                        } else {
+                            selectedCountry.orEmpty()
+                        },
                         style = TechnicalData,
                         color = TextMuted
                     )
@@ -188,8 +249,7 @@ fun ServersTabContent(
 
         Spacer(modifier = Modifier.height(14.dp))
 
-        // Search is scoped to country names on the first page and to nodes inside
-        // the selected country on the second page.
+        // Search applies to the current level: country, region/city, or server.
         Box(
             modifier = Modifier
                 .fillMaxWidth()
@@ -215,10 +275,11 @@ fun ServersTabContent(
                     decorationBox = { innerTextField ->
                         if (viewModel.searchQuery.isEmpty()) {
                             Text(
-                                text = if (selectedCountry == null)
-                                    "Search countries..."
-                                else
-                                    "Search regions, IP, or hostname...",
+                                text = when {
+                                    isCountriesPage -> "Search countries..."
+                                    isRegionsPage -> "Search regions or cities..."
+                                    else -> "Search IP or hostname..."
+                                },
                                 style = TechnicalData.copy(color = TextMuted, fontSize = 14.sp)
                             )
                         }
@@ -240,143 +301,160 @@ fun ServersTabContent(
 
         Spacer(modifier = Modifier.height(12.dp))
 
-        if (selectedCountry == null) {
-            // Page 1: countries only. Tapping a country opens its own server list.
-            if (viewModel.displayServers.isEmpty()) {
-                Box(
-                    modifier = Modifier.weight(1f).fillMaxWidth(),
-                    contentAlignment = Alignment.Center
-                ) {
-                    DirectoryEmptyState(viewModel = viewModel, message = "No countries available")
-                }
-            } else if (countrySummaries.isEmpty()) {
-                Box(
-                    modifier = Modifier.weight(1f).fillMaxWidth(),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Text(
-                        text = "No countries match your search",
-                        style = TechnicalData,
-                        color = TextMuted
-                    )
-                }
-            } else {
-                LazyColumn(
-                    state = listState,
-                    modifier = Modifier.weight(1f),
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    items(
-                        items = countrySummaries,
-                        key = { it.name },
-                        contentType = { "country" }
-                    ) { country ->
-                        CountryDirectoryCard(
-                            country = country,
-                            onClick = {
+        when {
+            isCountriesPage -> {
+                if (viewModel.displayServers.isEmpty()) {
+                    Box(
+                        modifier = Modifier.weight(1f).fillMaxWidth(),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        DirectoryEmptyState(viewModel, "No countries available")
+                    }
+                } else if (countrySummaries.isEmpty()) {
+                    EmptyDirectoryMessage("No countries match your search")
+                } else {
+                    LazyColumn(
+                        state = listState,
+                        modifier = Modifier.weight(1f),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        items(countrySummaries, key = { it.name }, contentType = { "country" }) { country ->
+                            CountryDirectoryCard(country) {
                                 viewModel.searchQuery = ""
+                                viewModel.selectedRegionFilter = null
                                 viewModel.selectedCountryFilter = country.name
                             }
-                        )
-                    }
-                }
-            }
-        } else {
-            // Page 2: server/region nodes belonging only to the selected country.
-            LazyRow(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                item {
-                    FilterChip(
-                        label = "BEST OVERALL",
-                        isSelected = viewModel.activeSort == SortCriteria.OVERALL,
-                        onClick = { viewModel.setSortCriteria(SortCriteria.OVERALL) }
-                    )
-                }
-                item {
-                    FilterChip(
-                        label = "TOP SCORE",
-                        isSelected = viewModel.activeSort == SortCriteria.SCORE,
-                        onClick = { viewModel.setSortCriteria(SortCriteria.SCORE) }
-                    )
-                }
-                item {
-                    FilterChip(
-                        label = "LOWEST PING",
-                        isSelected = viewModel.activeSort == SortCriteria.PING,
-                        onClick = { viewModel.setSortCriteria(SortCriteria.PING) }
-                    )
-                }
-                item {
-                    FilterChip(
-                        label = "FASTEST",
-                        isSelected = viewModel.activeSort == SortCriteria.SPEED,
-                        onClick = { viewModel.setSortCriteria(SortCriteria.SPEED) }
-                    )
-                }
-                item {
-                    FilterChip(
-                        label = "MOST ACTIVE",
-                        isSelected = viewModel.activeSort == SortCriteria.SESSIONS,
-                        onClick = { viewModel.setSortCriteria(SortCriteria.SESSIONS) }
-                    )
-                }
-                item {
-                    val countryResidentialCount =
-                        viewModel.filteredServers.count { it.isResidential }
-                    FilterChip(
-                        label = "RESIDENTIAL ($countryResidentialCount)",
-                        isSelected = viewModel.residentialOnly,
-                        onClick = { viewModel.residentialOnly = !viewModel.residentialOnly }
-                    )
-                }
-            }
-
-            Spacer(modifier = Modifier.height(12.dp))
-
-            if (viewModel.filteredServers.isEmpty()) {
-                Box(
-                    modifier = Modifier
-                        .weight(1f)
-                        .fillMaxWidth(),
-                    contentAlignment = Alignment.Center
-                ) {
-                    if (viewModel.lastLoadError != null && viewModel.displayServers.isEmpty()) {
-                        DirectoryEmptyState(viewModel = viewModel, message = "Could not load servers")
-                    } else {
-                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                            Text(
-                                text = "No regional servers found",
-                                style = MaterialTheme.typography.bodyLarge,
-                                color = TextMuted
-                            )
-                            Spacer(modifier = Modifier.height(6.dp))
-                            Text(
-                                text = "Try another search or clear the residential filter",
-                                style = TechnicalData,
-                                color = TextMuted.copy(alpha = 0.6f)
-                            )
                         }
                     }
                 }
-            } else {
-                LazyColumn(
-                    state = listState,
-                    modifier = Modifier.weight(1f),
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    items(
-                        items = viewModel.filteredServers,
-                        key = { it.ip },
-                        contentType = { "server_node" }
-                    ) { srv ->
-                        val isSelected = srv.ip == viewModel.selectedServer?.ip
-                        AdvancedServerCard(
-                            server = srv,
-                            isSelected = isSelected,
-                            onClick = { onServerSelected(srv) }
+            }
+
+            isRegionsPage -> {
+                Text(
+                    text = "Locations are approximate estimates based on each relay IP address.",
+                    style = TechnicalData,
+                    color = TextMuted.copy(alpha = 0.75f),
+                    modifier = Modifier.padding(bottom = 8.dp)
+                )
+
+                if (isLookingUp) {
+                    Text(
+                        text = "Resolving relay locations: ${viewModel.regionLookupProgress}/${viewModel.regionLookupTotal}",
+                        style = TechnicalData,
+                        color = StatusSuccess,
+                        modifier = Modifier.padding(bottom = 8.dp)
+                    )
+                }
+
+                if (regionSummaries.isEmpty() && isLookingUp) {
+                    Box(
+                        modifier = Modifier.weight(1f).fillMaxWidth(),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            Text("Finding regions...", color = Primary)
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Text(
+                                text = "${viewModel.regionLookupProgress} of ${viewModel.regionLookupTotal} servers checked",
+                                style = TechnicalData,
+                                color = TextMuted
+                            )
+                        }
+                    }
+                } else if (regionSummaries.isEmpty()) {
+                    EmptyDirectoryMessage("No regions match your search")
+                } else {
+                    LazyColumn(
+                        state = listState,
+                        modifier = Modifier.weight(1f),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        items(regionSummaries, key = { it.name }, contentType = { "region" }) { region ->
+                            RegionDirectoryCard(region) {
+                                viewModel.searchQuery = ""
+                                viewModel.selectedRegionFilter = region.name
+                            }
+                        }
+                    }
+                    if (unresolvedCount > 0) {
+                        Text(
+                            text = "Still locating $unresolvedCount servers...",
+                            style = TechnicalData,
+                            color = TextMuted,
+                            modifier = Modifier.padding(vertical = 8.dp)
                         )
+                    }
+                }
+            }
+
+            else -> {
+                LazyRow(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    item {
+                        FilterChip("BEST OVERALL", viewModel.activeSort == SortCriteria.OVERALL) {
+                            viewModel.setSortCriteria(SortCriteria.OVERALL)
+                        }
+                    }
+                    item {
+                        FilterChip("TOP SCORE", viewModel.activeSort == SortCriteria.SCORE) {
+                            viewModel.setSortCriteria(SortCriteria.SCORE)
+                        }
+                    }
+                    item {
+                        FilterChip("LOWEST PING", viewModel.activeSort == SortCriteria.PING) {
+                            viewModel.setSortCriteria(SortCriteria.PING)
+                        }
+                    }
+                    item {
+                        FilterChip("FASTEST", viewModel.activeSort == SortCriteria.SPEED) {
+                            viewModel.setSortCriteria(SortCriteria.SPEED)
+                        }
+                    }
+                    item {
+                        FilterChip("MOST ACTIVE", viewModel.activeSort == SortCriteria.SESSIONS) {
+                            viewModel.setSortCriteria(SortCriteria.SESSIONS)
+                        }
+                    }
+                    item {
+                        val countryResidentialCount = viewModel.filteredServers.count { it.isResidential }
+                        FilterChip("RESIDENTIAL ($countryResidentialCount)", viewModel.residentialOnly) {
+                            viewModel.residentialOnly = !viewModel.residentialOnly
+                        }
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(12.dp))
+
+                if (viewModel.filteredServers.isEmpty()) {
+                    Box(
+                        modifier = Modifier.weight(1f).fillMaxWidth(),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = "No servers in this region match your search",
+                            style = TechnicalData,
+                            color = TextMuted
+                        )
+                    }
+                } else {
+                    LazyColumn(
+                        state = listState,
+                        modifier = Modifier.weight(1f),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        items(
+                            items = viewModel.filteredServers,
+                            key = { it.ip },
+                            contentType = { "server_node" }
+                        ) { server ->
+                            AdvancedServerCard(
+                                server = server,
+                                isSelected = server.ip == viewModel.selectedServer?.ip,
+                                onClick = { onServerSelected(server) }
+                            )
+                        }
                     }
                 }
             }
@@ -387,10 +465,7 @@ fun ServersTabContent(
 }
 
 @Composable
-private fun CountryDirectoryCard(
-    country: CountrySummary,
-    onClick: () -> Unit
-) {
+private fun CountryDirectoryCard(country: CountrySummary, onClick: () -> Unit) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -409,25 +484,20 @@ private fun CountryDirectoryCard(
                 .border(1.dp, BorderHairline, CircleShape),
             contentAlignment = Alignment.Center
         ) {
-            Text(
-                text = countryCodeToFlag(country.code),
-                fontSize = 21.sp
-            )
+            Text(countryCodeToFlag(country.code), fontSize = 21.sp)
         }
         Spacer(modifier = Modifier.width(12.dp))
         Column(modifier = Modifier.weight(1f)) {
             Text(
                 text = country.name,
-                style = MaterialTheme.typography.bodyLarge.copy(
-                    fontWeight = FontWeight.SemiBold
-                ),
+                style = MaterialTheme.typography.bodyLarge.copy(fontWeight = FontWeight.SemiBold),
                 color = Primary,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis
             )
             Spacer(modifier = Modifier.height(3.dp))
             Text(
-                text = "${country.serverCount} servers / regions",
+                text = "${country.serverCount} servers",
                 style = TechnicalData,
                 color = TextMuted
             )
@@ -452,39 +522,92 @@ private fun CountryDirectoryCard(
 }
 
 @Composable
-private fun DirectoryEmptyState(
-    viewModel: VpnViewModel,
-    message: String
-) {
+private fun RegionDirectoryCard(region: RegionSummary, onClick: () -> Unit) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(11.dp))
+            .border(1.dp, BorderHairline, RoundedCornerShape(11.dp))
+            .background(Color(0xFF101010))
+            .clickable(onClick = onClick)
+            .padding(horizontal = 14.dp, vertical = 14.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Box(
+            modifier = Modifier
+                .size(42.dp)
+                .clip(RoundedCornerShape(9.dp))
+                .background(Color(0xFF1D1D1D))
+                .border(1.dp, BorderHairline, RoundedCornerShape(9.dp)),
+            contentAlignment = Alignment.Center
+        ) {
+            Icon(
+                imageVector = Icons.Rounded.ChevronRight,
+                contentDescription = null,
+                tint = if (region.unavailable) TextMuted else StatusSuccess,
+                modifier = Modifier.size(20.dp)
+            )
+        }
+        Spacer(modifier = Modifier.width(12.dp))
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = region.name,
+                style = MaterialTheme.typography.bodyLarge.copy(fontWeight = FontWeight.SemiBold),
+                color = if (region.unavailable) TextMuted else Primary,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+            Spacer(modifier = Modifier.height(3.dp))
+            Text(
+                text = region.citySummary,
+                style = TechnicalData,
+                color = TextMuted,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+        Text(
+            text = region.serverCount.toString(),
+            style = TechnicalData.copy(fontWeight = FontWeight.Bold),
+            color = StatusSuccess,
+            modifier = Modifier
+                .clip(RoundedCornerShape(6.dp))
+                .background(StatusSuccess.copy(alpha = 0.10f))
+                .padding(horizontal = 9.dp, vertical = 5.dp)
+        )
+    }
+}
+
+@Composable
+private fun EmptyDirectoryMessage(message: String) {
     Box(
-        modifier = Modifier.fillMaxSize(),
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(140.dp),
         contentAlignment = Alignment.Center
     ) {
-        if (viewModel.lastLoadError != null) {
-            Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                Text(
-                    text = "Fetch failed",
-                    style = MaterialTheme.typography.bodyLarge,
-                    color = Primary
-                )
-                Spacer(modifier = Modifier.height(6.dp))
-                Text(
-                    text = viewModel.lastLoadError ?: message,
-                    style = TechnicalData,
-                    color = TextMuted.copy(alpha = 0.6f),
-                    textAlign = androidx.compose.ui.text.style.TextAlign.Center,
-                    modifier = Modifier.padding(horizontal = 24.dp)
-                )
-                Spacer(modifier = Modifier.height(16.dp))
-                FilterChip(
-                    label = "RETRY",
-                    isSelected = false,
-                    onClick = { viewModel.loadServers() }
-                )
-            }
-        } else {
-            Text(text = message, style = TechnicalData, color = TextMuted)
+        Text(text = message, style = TechnicalData, color = TextMuted)
+    }
+}
+
+@Composable
+private fun DirectoryEmptyState(viewModel: VpnViewModel, message: String) {
+    if (viewModel.lastLoadError != null) {
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            Text("Fetch failed", style = MaterialTheme.typography.bodyLarge, color = Primary)
+            Spacer(modifier = Modifier.height(6.dp))
+            Text(
+                text = viewModel.lastLoadError ?: message,
+                style = TechnicalData,
+                color = TextMuted.copy(alpha = 0.6f),
+                textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                modifier = Modifier.padding(horizontal = 24.dp)
+            )
+            Spacer(modifier = Modifier.height(16.dp))
+            FilterChip("RETRY", false) { viewModel.loadServers() }
         }
+    } else {
+        Text(text = message, style = TechnicalData, color = TextMuted)
     }
 }
 
