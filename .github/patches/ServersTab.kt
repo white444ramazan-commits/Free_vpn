@@ -243,7 +243,12 @@ fun ServersTabContent(
         if (selectedCountry == null) {
             // Page 1: countries only. Tapping a country opens its own server list.
             if (viewModel.displayServers.isEmpty()) {
-                DirectoryEmptyState(viewModel = viewModel, message = "No countries available")
+                Box(
+                    modifier = Modifier.weight(1f).fillMaxWidth(),
+                    contentAlignment = Alignment.Center
+                ) {
+                    DirectoryEmptyState(viewModel = viewModel, message = "No countries available")
+                }
             } else if (countrySummaries.isEmpty()) {
                 Box(
                     modifier = Modifier.weight(1f).fillMaxWidth(),
@@ -452,9 +457,7 @@ private fun DirectoryEmptyState(
     message: String
 ) {
     Box(
-        modifier = Modifier
-            .fillMaxWidth()
-            .fillMaxHeight(),
+        modifier = Modifier.fillMaxSize(),
         contentAlignment = Alignment.Center
     ) {
         if (viewModel.lastLoadError != null) {
