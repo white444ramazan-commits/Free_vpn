@@ -42,7 +42,9 @@ class VpnManager(private val context: Context) {
                 "ping",
                 "ping-restart",
                 "ping-exit",
-                "inactive"
+                "inactive",
+                "keepalive",
+                "nobind"
             )
 
             // Replace short fail-fast/idle-exit options supplied by a relay config.
