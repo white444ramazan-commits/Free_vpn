@@ -1,4 +1,4 @@
-name: Android APK
+name: Free VPN — standalone APK
 
 on:
   push:
@@ -10,30 +10,65 @@ permissions:
 
 jobs:
   build:
-    name: Build debug APK
+    name: Build single-app VPN APK
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
+      - name: Checkout Free VPN and pinned VPN engine source
         uses: actions/checkout@v6
+        with:
+          submodules: recursive
+          fetch-depth: 0
 
-      - name: Set up JDK 17
+      - name: Set up JDK 21
         uses: actions/setup-java@v5
         with:
           distribution: temurin
-          java-version: "17"
+          java-version: "21"
 
-      - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@v6
-        with:
-          gradle-version: "8.13"
+      - name: Rebrand standalone app as Free VPN
+        working-directory: standalone-vpn
+        shell: bash
+        run: |
+          set -euo pipefail
 
-      - name: Build APK
-        run: gradle --no-daemon --stacktrace assembleDebug
+          # Use the existing Free VPN package id so Android recognises it as
+          # the next app generation after the earlier prototype.
+          find app/src -type f \\( -name '*.kt' -o -name '*.java' \\) -print0 |
+            xargs -0 -r sed -i 's/com\\.payaq\\.opengatevpn/com.freevpn.client/g'
 
-      - name: Upload APK
+          sed -i \\
+            -e 's/namespace = "com.payaq.opengatevpn"/namespace = "com.freevpn.client"/' \\
+            -e 's/applicationId = "com.payaq.opengatevpn"/applicationId = "com.freevpn.client"/' \\
+            -e 's/versionCode = 1/versionCode = 3/' \\
+            -e 's/versionName = "1.2.0"/versionName = "3.0.0"/' \\
+            app/build.gradle.kts
+
+          sed -i 's#<string name="app_name">OpenGate VPN</string>#<string name="app_name">Free VPN</string>#' \\
+            app/src/main/res/values/strings.xml
+
+          sed -i \\
+            -e 's/text = "OpenGate"/text = "Free VPN"/' \\
+            -e 's/contentDescription = "OpenGate VPN Logo"/contentDescription = "Free VPN logo"/' \\
+            app/src/main/java/com/payaq/opengatevpn/ui/main/MainScreen.kt
+
+          sed -i \\
+            -e 's/OpenGate could not/Free VPN could not/g' \\
+            -e 's/OpenGate needs/Free VPN needs/g' \\
+            app/src/main/java/com/payaq/opengatevpn/ui/main/VpnViewModel.kt
+
+          sed -i \\
+            -e 's/opengate@terminal/freevpn@terminal/g' \\
+            -e 's/opengate:~#/freevpn:~#/g' \\
+            app/src/main/java/com/payaq/opengatevpn/ui/main/LogsTab.kt
+
+      - name: Build standalone APK with the OpenVPN engine embedded
+        working-directory: standalone-vpn
+        run: ./gradlew --no-daemon --stacktrace assembleDebug
+
+      - name: Upload standalone APK
         uses: actions/upload-artifact@v4
         with:
-          name: free-vpn-debug-apk
-          path: app/build/outputs/apk/debug/app-debug.apk
+          name: free-vpn-standalone-apk
+          path: standalone-vpn/app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
           retention-days: 14

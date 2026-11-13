@@ -1,48 +1,45 @@
-# Free VPN for Android
+# Free VPN for Android — standalone APK
 
-Free VPN is an Android client for the public VPN Gate relay directory. It fetches the live server list, groups available relays by country, and lets the user select an OpenVPN profile without manually downloading configuration files.
+This repository now builds a **single standalone Android VPN app**. The OpenVPN engine is included inside the APK; users do **not** need to install OpenVPN for Android or another VPN client separately.
 
-## VPN Gate server directory
+## What it includes
 
-The app reads the public CSV endpoint maintained by VPN Gate:
+- Embedded OpenVPN tunnel engine and Android `VpnService`.
+- Live directory of public VPN Gate relay servers.
+- Automatic country/location discovery from the current directory.
+- Search, filters, server ranking, ping/speed/session information.
+- Connect, disconnect, pause/resume, connection statistics and diagnostics.
 
-- API: https://www.vpngate.net/api/iphone/
-- Project: https://www.vpngate.net/en/
-- VPN Gate is an academic experiment operated by the University of Tsukuba and uses volunteer-run public relays.
+The current server supply comes from the public VPN Gate volunteer relay network. The app does not operate its own global server infrastructure. Locations shown in the app are only locations currently present in the upstream directory; coverage and availability can change, and no country is guaranteed to be online at all times.
 
-The directory is dynamic. Countries and servers shown in the app are only those currently returned by the upstream API with an OpenVPN configuration. The app does not claim permanent availability or coverage in every country.
+## How to install
 
-## OpenVPN engine requirement
+1. Download the latest `free-vpn-standalone-apk` artifact from the repository's **Actions** tab.
+2. Extract `app-debug.apk` from the downloaded ZIP.
+3. Install the APK on Android and approve Android's standard VPN permission when asked.
 
-The current app uses the documented AIDL control API of **OpenVPN for Android** (package `de.blinkt.openvpn`) as its OpenVPN engine. Install that free client once from Google Play:
+No separate OpenVPN app is required.
 
-https://play.google.com/store/apps/details?id=de.blinkt.openvpn
+## Build source and reproducibility
 
-After it is installed, Free VPN can ask it to start the selected inline VPN Gate profile and request the normal Android VPN permission. The OpenVPN engine runs the tunnel; Free VPN provides the server directory and selection UI.
+The standalone client and bundled VPN engine are pinned as the `standalone-vpn` Git submodule at:
 
-This integration uses the public external-app API documented by the OpenVPN for Android project. The API is not the same as bundling the OpenVPN engine into this APK.
+- Upstream project: https://github.com/IyedAmiri/OpenGateVPN
+- Pinned source commit: `12f8ea97976f1bac0307a013b40712098b865d43`
+- The GitHub Actions workflow rebrands its application package to `com.freevpn.client`, the app label to **Free VPN**, and the version to `3.0.0`, then builds a debug APK.
+
+Clone with submodules enabled:
+
+```sh
+git clone --recurse-submodules https://github.com/white444ramazan-commits/Free_vpn.git
+cd Free_vpn/standalone-vpn
+./gradlew assembleDebug
+```
+
+The distributable contains the corresponding source in the pinned submodule. The upstream project and its bundled engine are GPL-licensed; preserve the GPL notices and source when redistributing modified builds. See `standalone-vpn/LICENSE` and `standalone-vpn/vpnLib/LICENSE`.
 
 ## Privacy and safety
 
-VPN Gate relays are operated by volunteers, not by this app. Relay operators may observe traffic metadata and may apply their own logging policy. Never use an unknown public relay for sensitive accounts, banking, or traffic that you would not trust on an open network. Prefer HTTPS even while connected. A server's presence in the directory does not guarantee that it is reachable from your network or that its advertised speed is current.
+VPN Gate relays are run by volunteers and are not controlled by this app. A relay operator may observe connection metadata and may handle traffic according to its own logging practices. Do not use public relays for banking, sensitive accounts, or unencrypted confidential traffic. Prefer HTTPS. A directory listing, ping, or advertised throughput is not proof that a complete VPN handshake will succeed.
 
-The app downloads the directory over HTTPS, caches the last successful response, and does not upload user traffic or private keys.
-
-## Build
-
-GitHub Actions builds `app-debug.apk` on every push to `main`.
-
-- JDK 17
-- Gradle 8.13
-- Android Gradle Plugin 8.13.2
-- Kotlin 2.2.20
-
-Build locally with:
-
-```sh
-gradle assembleDebug
-```
-
-## Attribution
-
-The AIDL interface follows the public OpenVPN for Android external control API and its Apache-2.0-licensed remote example. See https://github.com/schwabe/ics-openvpn. VPN Gate server metadata and OpenVPN configurations are supplied by https://www.vpngate.net/.
+The app retrieves the server directory over HTTPS. VPN Gate server addresses and availability are dynamic.

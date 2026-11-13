@@ -1,0 +1,3 @@
+[submodule "standalone-vpn"]
+    path = standalone-vpn
+    url = https://github.com/IyedAmiri/OpenGateVPN.git
