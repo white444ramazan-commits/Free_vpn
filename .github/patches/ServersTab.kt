@@ -268,7 +268,7 @@ fun ServersTabContent(
                 ) {
                     items(
                         items = countrySummaries,
-                        key = { it.code.ifBlank { it.name } },
+                        key = { it.name },
                         contentType = { "country" }
                     ) { country ->
                         CountryDirectoryCard(
