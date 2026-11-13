@@ -59,7 +59,6 @@ class VpnManager(private val context: Context) {
                 append("\n")
                 appendLine("nobind")
                 appendLine("connect-retry 5 60")
-                appendLine("connect-retry-max 0")
                 appendLine("connect-timeout 20")
                 appendLine("resolv-retry infinite")
                 appendLine("ping 20")
