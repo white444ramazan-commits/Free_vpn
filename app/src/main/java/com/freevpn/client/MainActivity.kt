@@ -429,18 +429,18 @@ class MainActivity : Activity() {
     private fun withVpnGateCredentials(raw: String): String {
         if (raw.contains("<auth-user-pass>", ignoreCase = true)) return raw
 
-        val credentialBlock = "<auth-user-pass>\\nvpn\\nvpn\\n</auth-user-pass>"
-        val authDirective = Regex("(?im)^\\\\s*auth-user-pass(?:\\\\s+[^\\\\r\\\\n]+)?\\\\s*$")
+        val credentialBlock = "<auth-user-pass>\nvpn\nvpn\n</auth-user-pass>"
+        val authDirective = Regex("(?im)^\\s*auth-user-pass(?:\\s+[^\\r\\n]+)?\\s*$")
         val normalized = if (authDirective.containsMatchIn(raw)) {
             authDirective.replaceFirst(raw, credentialBlock)
         } else {
-            raw.trimEnd() + "\\nauth-user-pass\\n"
+            raw.trimEnd() + "\nauth-user-pass\n"
         }
 
         return if (normalized.contains("<auth-user-pass>", ignoreCase = true)) {
             normalized
         } else {
-            normalized + credentialBlock + "\\nauth-nocache\\n"
+            normalized + credentialBlock + "\nauth-nocache\n"
         }
     }
 
@@ -520,8 +520,8 @@ class MainActivity : Activity() {
             val ping = if (server.pingMs >= 0) server.pingMs.toString() + " ms" else "ping н/д"
             val label = TextView(this).apply {
                 text = (if (selected) "✓  " else "") +
-                    server.country + " (" + server.countryCode + ")\\n" +
-                    server.ip + " · " + server.speedMbps + " Mbps · " + ping + "\\n" +
+                    server.country + " (" + server.countryCode + ")\n" +
+                    server.ip + " · " + server.speedMbps + " Mbps · " + ping + "\n" +
                     "Сессий: " + server.sessions + " · журнал: " +
                     (server.logPolicy.ifBlank { "не указан" })
                 textSize = 13f
