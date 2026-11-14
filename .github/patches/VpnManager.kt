@@ -44,6 +44,7 @@ class VpnManager(private val context: Context) {
                 "ping-exit",
                 "inactive",
                 "keepalive",
+                "explicit-exit-notify",
                 "nobind"
             )
 
@@ -58,12 +59,20 @@ class VpnManager(private val context: Context) {
                 append(preservedLines.joinToString("\n"))
                 append("\n")
                 appendLine("nobind")
-                appendLine("connect-retry 5 60")
-                appendLine("connect-timeout 12")
+                appendLine("connect-retry 2 10")
+                appendLine("connect-timeout 8")
                 appendLine("resolv-retry infinite")
-                appendLine("ping 20")
-                appendLine("ping-restart 120")
-                if (!originalConfig.contains("explicit-exit-notify")) {
+                appendLine("ping 10")
+                appendLine("ping-restart 45")
+                if (!originalConfig.contains("persist-key", ignoreCase = true)) {
+                    appendLine("persist-key")
+                }
+                if (!originalConfig.contains("persist-tun", ignoreCase = true)) {
+                    appendLine("persist-tun")
+                }
+                val explicitlyTcp = Regex("(?im)^\\s*proto\\s+tcp(?:-client)?\\s*$")
+                    .containsMatchIn(originalConfig)
+                if (!explicitlyTcp) {
                     appendLine("explicit-exit-notify 2")
                 }
             }

@@ -24,12 +24,16 @@ import com.freevpn.client.data.vpn.VpnManager
 import de.blinkt.openvpn.core.ConnectionStatus
 import de.blinkt.openvpn.core.VpnStatus
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import java.net.HttpURLConnection
+import java.net.URL
 
 /** Connection states the UI renders. */
 enum class ConnectionState {
@@ -94,9 +98,6 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
     /** Label for the current attempt; survives intermediate progress events. */
     private var attemptLabel: String? = null
 
-    /** True while the attempt came from the error banner's RETRY button: single-shot. */
-    private var manualSingleShotRetry = false
-
     /** Full server objects (heavy Base64 configs); never exposed to Compose. */
     private var fullServers: List<VpnServer> = emptyList()
 
@@ -147,7 +148,6 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
     var regionLookupTotal by mutableIntStateOf(0)
         private set
     private var regionLookupJob: Job? = null
-    private var regionWarmupJob: Job? = null
 
     /** Once connected, keep retrying the selected relay until the user stops it. */
     private var autoReconnectAfterDrop = false
@@ -314,7 +314,9 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
     private var telemetryJob: Job? = null
     private val mainHandler = Handler(Looper.getMainLooper())
     private var connectionWatchdogJob: Job? = null
+    private var tunnelHealthJob: Job? = null
     private var retryJob: Job? = null
+    private val retryAttemptedIps = linkedSetOf<String>()
     private var loadJob: Job? = null
     private var loadGeneration = 0
 
@@ -363,6 +365,9 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
                 connectAttempts = 0
                 activeIntent = ConnectionIntent.NONE
                 autoReconnectAfterDrop = true
+                retryAttemptedIps.clear()
+                selectedServer?.ip?.let { retryAttemptedIps.add(it) }
+                startTunnelHealthMonitor()
                 lastErrorHeadline = null
                 lastErrorDetail = null
                 if (connectionStartTime <= 0L) {
@@ -377,6 +382,7 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
             }
             else -> {
                 connectionWatchdogJob?.cancel()
+                stopTunnelHealthMonitor()
                 stopTelemetry()
             }
         }
@@ -387,7 +393,6 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
             statusLabel = attemptLabel ?: defaultStatusLabel(newState)
         } else {
             attemptLabel = null
-            manualSingleShotRetry = false
             statusLabel = when (newState) {
                 // "Optimal gateway ready" is only honest when the card actually shows
                 // the auto-picked best node — not after a manual selection.
@@ -441,51 +446,149 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
      * couple of times with visible status before showing the hard error banner —
      * volunteer nodes flap, and one bad moment shouldn't look like "server down".
      */
+    /**
+     * Keep retrying while the user has not pressed Stop. Two failures on one relay
+     * trigger a move to another currently-active relay before the next attempts.
+     */
     private fun scheduleConnectRetry(headline: String, detail: String, dropLogLine: String) {
-        val config = bestServerConfig
-        val retryForever = autoReconnectAfterDrop && !manualSingleShotRetry
-        if (config == null || (!retryForever && connectAttempts >= MAX_CONNECT_ATTEMPTS)) {
+        if (bestServerConfig == null) {
             failConnection(
                 headline, detail,
-                "$dropLogLine Gave up after ${connectAttempts + 1} attempt(s). Please reconnect or choose another server."
+                "$dropLogLine No usable server configuration is available."
             )
             return
         }
+
         connectAttempts++
+        if (connectAttempts % RETRIES_PER_SERVER == 0) {
+            rotateRetryServer()
+        }
+        val config = bestServerConfig ?: return
         stopTelemetry()
         activeIntent = ConnectionIntent.AUTO_RETRY
-        vpnStatus = if (retryForever) {
-            "Reconnecting to ${selectedServer?.countryLong ?: "gateway"}... (attempt $connectAttempts)"
-        } else {
-            "Retrying ${selectedServer?.countryLong ?: "gateway"}... (attempt ${connectAttempts + 1}/${MAX_CONNECT_ATTEMPTS + 1})"
-        }
+        vpnStatus = "Reconnecting to ${selectedServer?.countryLong ?: "gateway"}... (attempt $connectAttempts)"
         addLog(
             "RETRY",
-            if (retryForever) {
-                "$dropLogLine Reconnecting to ${selectedServer?.countryLong ?: "gateway"} (${selectedServer?.ip ?: "?"}) — attempt $connectAttempts."
-            } else {
-                "$dropLogLine Retrying ${selectedServer?.countryLong ?: "gateway"} (${selectedServer?.ip ?: "?"}) — attempt ${connectAttempts + 1} of ${MAX_CONNECT_ATTEMPTS + 1}."
-            }
+            "$dropLogLine Retrying through ${selectedServer?.countryLong ?: "gateway"} " +
+                "(${selectedServer?.ip ?: "?"}) — attempt $connectAttempts."
         )
-        attemptLabel = if (retryForever) {
-            "RECONNECTING (ATTEMPT $connectAttempts)..."
-        } else {
-            "RETRYING CONNECTION (${connectAttempts + 1}/${MAX_CONNECT_ATTEMPTS + 1})..."
-        }
+        attemptLabel = "RECONNECTING (ATTEMPT $connectAttempts)..."
         transitionTo(ConnectionState.RECONNECTING, "retry attempt $connectAttempts")
-        val attempt = connectAttempts
+
         retryJob?.cancel()
         switchLaunchJob?.cancel()
+        val waitMs = (RETRY_BACKOFF_BASE_MS * connectAttempts.coerceAtMost(5))
+            .coerceAtMost(MAX_RETRY_BACKOFF_MS)
         retryJob = viewModelScope.launch {
-            delay(RETRY_BACKOFF_MS)
-            if (connectionState == ConnectionState.RECONNECTING && activeIntent == ConnectionIntent.AUTO_RETRY) {
+            delay(waitMs)
+            if (connectionState == ConnectionState.RECONNECTING &&
+                activeIntent == ConnectionIntent.AUTO_RETRY
+            ) {
                 beginAttempt()
-                addLog("CONNECT", "Launching attempt ${attempt + 1} → ${selectedServer?.ip ?: "?"}...")
-                if (!vpnManager.startVpn(config)) {
-                    failConnection(headline, detail, "Retry attempt $attempt failed to launch.")
+                val target = bestServerConfig ?: config
+                addLog(
+                    "CONNECT",
+                    "Launching retry $connectAttempts → ${selectedServer?.ip ?: "?"}..."
+                )
+                if (!vpnManager.startVpn(target)) {
+                    addLog("LAUNCH", "OpenVPN rejected the profile; trying another active relay.")
+                    rotateRetryServer()
+                    scheduleConnectRetry(
+                        headline,
+                        detail,
+                        "OpenVPN could not start the selected profile."
+                    )
                 }
             }
         }
+    }
+
+    /** Move to an untried active server; if all have failed, cycle through them again. */
+    private fun rotateRetryServer(): Boolean {
+        val currentIp = selectedServer?.ip
+        val ranked = displayServers
+            .asSequence()
+            .filter { it.availability.equals("active", ignoreCase = true) }
+            .sortedByDescending { it.overallRankScore }
+            .mapNotNull { serverLookup[it.ip] }
+            .toList()
+
+        if (ranked.isEmpty()) return false
+        var next = ranked.firstOrNull { it.ip != currentIp && it.ip !in retryAttemptedIps }
+        if (next == null) {
+            retryAttemptedIps.clear()
+            currentIp?.let { retryAttemptedIps.add(it) }
+            next = ranked.firstOrNull { it.ip != currentIp }
+        }
+        if (next == null) return false
+
+        selectedServer = next
+        bestServerConfig = next.openVpnConfigDataBase64
+        retryAttemptedIps.add(next.ip)
+        val bestIp = displayServers.maxByOrNull { it.overallRankScore }?.ip
+        isAutoSelectedBest = next.ip == bestIp
+        addLog(
+            "SERVER",
+            "Relay unavailable; switching automatically to ${next.countryLong} (${next.ip})."
+        )
+        return true
+    }
+
+    /** A real HTTPS 204 check is routed through Android's active VPN by default. */
+    private suspend fun hasInternetThroughTunnel(): Boolean = withContext(Dispatchers.IO) {
+        val connection = URL(TUNNEL_PROBE_URL).openConnection() as HttpURLConnection
+        try {
+            connection.requestMethod = "GET"
+            connection.connectTimeout = TUNNEL_PROBE_TIMEOUT_MS
+            connection.readTimeout = TUNNEL_PROBE_TIMEOUT_MS
+            connection.instanceFollowRedirects = false
+            connection.useCaches = false
+            connection.setRequestProperty("Cache-Control", "no-cache, no-store")
+            connection.setRequestProperty("Pragma", "no-cache")
+            connection.connect()
+            connection.responseCode == 204
+        } catch (e: Exception) {
+            Log.w("FreeVPN_Health", "VPN tunnel connectivity probe failed", e)
+            false
+        } finally {
+            connection.disconnect()
+        }
+    }
+
+    /** Detects a stale VPN icon: the tunnel must pass real traffic, not just report CONNECTED. */
+    private fun startTunnelHealthMonitor() {
+        if (tunnelHealthJob?.isActive == true) return
+        tunnelHealthJob = viewModelScope.launch {
+            delay(TUNNEL_PROBE_INITIAL_DELAY_MS)
+            var failures = 0
+            while (connectionState == ConnectionState.CONNECTED) {
+                val healthy = hasInternetThroughTunnel()
+                if (connectionState != ConnectionState.CONNECTED) break
+                if (healthy) {
+                    failures = 0
+                } else {
+                    failures++
+                    addLog(
+                        "HEALTH",
+                        "VPN reports connected but the internet probe failed ($failures/2)."
+                    )
+                    if (failures >= 2) {
+                        scheduleConnectRetry(
+                            "VPN Tunnel Has No Internet",
+                            "OpenVPN reported a connection, but HTTPS traffic stopped passing through the tunnel. Free VPN is reconnecting.",
+                            "Tunnel connectivity probe failed twice."
+                        )
+                        break
+                    }
+                }
+                delay(TUNNEL_PROBE_INTERVAL_MS)
+            }
+        }
+    }
+
+    private fun stopTunnelHealthMonitor() {
+        tunnelHealthJob?.cancel()
+        tunnelHealthJob = null
     }
 
     private fun startConnectionWatchdog() {
@@ -725,22 +828,30 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
                         }
                     }
 
-                    is VpnGateResult.EmptyFeed -> {
-                        if (displayServers.isEmpty()) {
-                            lastLoadError = "Directory returned no usable OpenVPN profiles"
-                            if (!isTunnelActive) transitionTo(ConnectionState.ERROR, "empty directory feed")
-                        } else {
-                            addLog("INFO", "Network refresh returned no rows; showing saved server list.")
-                        }
-                    }
-
+                    is VpnGateResult.EmptyFeed,
                     is VpnGateResult.NetworkError -> {
-                        val detail = primary.cause?.javaClass?.simpleName ?: "network error"
-                        if (displayServers.isEmpty()) {
-                            lastLoadError = "Could not reach VPN directory sources ($detail)"
-                            if (!isTunnelActive) transitionTo(ConnectionState.ERROR, "directory fetch failed")
-                        } else {
-                            addLog("INFO", "Directory refresh failed ($detail); saved servers remain available.")
+                        val fallbackStartedAt = System.currentTimeMillis()
+                        val base = fullServers
+                        addLog("INFO", "Primary VPN Gate feed unavailable; checking independent public indexes.")
+                        when (val fallback = repository.mergeSupplementalServers(base)) {
+                            is VpnGateResult.Success -> {
+                                if (gen != loadGeneration) return@launch
+                                applyFetchedServers(
+                                    fallback,
+                                    System.currentTimeMillis() - fallbackStartedAt,
+                                    isTunnelActive
+                                )
+                                addLog("READY", "Loaded ${fallback.servers.size} profiles from available fallback indexes.")
+                            }
+                            is VpnGateResult.EmptyFeed,
+                            is VpnGateResult.NetworkError -> {
+                                if (displayServers.isEmpty()) {
+                                    lastLoadError = "No public OpenVPN server directory could be reached"
+                                    if (!isTunnelActive) transitionTo(ConnectionState.ERROR, "all directory sources unavailable")
+                                } else {
+                                    addLog("INFO", "Refresh failed; cached servers remain available.")
+                                }
+                            }
                         }
                     }
                 }
@@ -793,24 +904,8 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
                 .onFailure { Log.w("FreeVPN_Directory", "Could not save directory cache", it) }
         }
 
-        // Start GeoIP enrichment after first paint. Cached locations and inline
-        // MaxMind data are ready now; the remaining lookups warm future country screens.
-        regionWarmupJob?.cancel()
-        val pendingLocations = fullServers
-            .filter { regionLocations[it.ip] == null }
-            .map { it.ip to it.countryShort }
-        if (pendingLocations.isNotEmpty()) {
-            regionWarmupJob = viewModelScope.launch {
-                runCatching { regionRepository.prewarm(pendingLocations, concurrency = 12) }
-                    .onFailure { Log.w("FreeVPN_Geo", "Background region prewarm failed", it) }
-                if (pendingLocations.isNotEmpty()) {
-                    regionLocations = fullServers.mapNotNull { server ->
-                        regionRepository.cachedLocation(server.ip)?.let { server.ip to it }
-                    }.toMap() + regionLocations
-                }
-            }
-        }
-
+        // GeoIP lookups are lazy: resolving every relay on startup caused
+        // unnecessary background traffic and delayed the initial menu.
         val currentActiveIp = selectedServer?.ip
         val currentInFetched = currentActiveIp?.let { serverLookup[it] }
 
@@ -827,7 +922,11 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
             )
         } else {
             if (selectedServer == null || currentInFetched == null) {
-                val best = fetched.maxByOrNull { it.score } ?: fetched.first()
+                val best = fetched
+                    .filter { it.availability.equals("active", ignoreCase = true) }
+                    .maxByOrNull { it.score }
+                    ?: fetched.maxByOrNull { it.score }
+                    ?: fetched.first()
                 selectedServer = best
                 bestServerConfig = best.openVpnConfigDataBase64
                 isAutoSelectedBest = true
@@ -883,6 +982,8 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
     fun selectServer(server: VpnServer) {
         selectedServer = server
         bestServerConfig = server.openVpnConfigDataBase64
+        retryAttemptedIps.clear()
+        retryAttemptedIps.add(server.ip)
         val topScore = fullServers.maxOfOrNull { it.score } ?: 0L
         isAutoSelectedBest = (server.score == topScore)
 
@@ -928,6 +1029,7 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
         selectServer(newServer)
 
         if (wasActive) {
+            autoReconnectAfterDrop = true
             retryJob?.cancel()
             switchLaunchJob?.cancel()
             connectAttempts = 0
@@ -979,7 +1081,9 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
             logIgnored("manual retry")
             return
         }
-        manualSingleShotRetry = true
+        autoReconnectAfterDrop = true
+        retryAttemptedIps.clear()
+        selectedServer?.ip?.let { retryAttemptedIps.add(it) }
         attemptLabel = "RETRYING CONNECTION..."
     }
 
@@ -1010,10 +1114,11 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
         connectionStartTime = 0L
         pausedElapsedSeconds = 0L
         totalSessionMb = 0f
-        // A banner-initiated retry is single-shot: preset attempts to the max so the
-        // first failure exhausts them immediately instead of auto-retrying again.
-        autoReconnectAfterDrop = false
-        connectAttempts = if (manualSingleShotRetry) MAX_CONNECT_ATTEMPTS else 0
+        // Keep the session active until the user explicitly presses Stop.
+        autoReconnectAfterDrop = true
+        retryAttemptedIps.clear()
+        selectedServer?.ip?.let { retryAttemptedIps.add(it) }
+        connectAttempts = 0
         beginAttempt()
         transitionTo(ConnectionState.CONNECTING, "user connect")
         vpnStatus = "Connecting to ${selectedServer?.countryLong ?: "Gateway"}..."
@@ -1025,10 +1130,19 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
 
     /** Config parse/launch failed inside VpnManager — report immediately, don't wait out the watchdog. */
     fun onLaunchFailed() {
-        failConnection(
+        if (!autoReconnectAfterDrop) {
+            failConnection(
+                "Failed to Start Tunnel",
+                "OpenVPN could not launch the selected profile. Choose another server and try again.",
+                "Tunnel launch failed and automatic reconnect is not armed."
+            )
+            return
+        }
+        rotateRetryServer()
+        scheduleConnectRetry(
             "Failed to Start Tunnel",
-            "OpenGate could not launch the OpenVPN process for ${selectedServer?.ip ?: "the selected gateway"}. The server's configuration may be invalid.",
-            "Tunnel launch failed — configuration rejected. Please choose another server."
+            "OpenVPN could not launch the current profile. Free VPN is trying another active relay.",
+            "Tunnel launch failed — profile rejected."
         )
     }
 
@@ -1143,11 +1257,13 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     companion object {
-        /** Extra attempts after the first one before surfacing a hard error banner. */
-        private const val MAX_CONNECT_ATTEMPTS = 2
-
-        /** Wait between retry attempts — long enough to let the old process die cleanly. */
-        private const val RETRY_BACKOFF_MS = 2_000L
+        private const val RETRIES_PER_SERVER = 2
+        private const val RETRY_BACKOFF_BASE_MS = 1_500L
+        private const val MAX_RETRY_BACKOFF_MS = 8_000L
+        private const val TUNNEL_PROBE_URL = "https://connectivitycheck.gstatic.com/generate_204"
+        private const val TUNNEL_PROBE_TIMEOUT_MS = 5_000
+        private const val TUNNEL_PROBE_INITIAL_DELAY_MS = 12_000L
+        private const val TUNNEL_PROBE_INTERVAL_MS = 18_000L
 
         /**
          * After disconnecting one gateway, wait this long before launching the next so

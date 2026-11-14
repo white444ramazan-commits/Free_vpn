@@ -11,10 +11,14 @@ import io.ktor.client.request.get
 import io.ktor.client.request.header
 import io.ktor.client.statement.bodyAsText
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.supervisorScope
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
@@ -25,6 +29,8 @@ import java.io.File
 import java.io.IOException
 import java.io.StringReader
 import java.util.Locale
+import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicReference
 
 sealed interface VpnGateResult {
     data class Success(
@@ -193,38 +199,61 @@ class VpnGateApi(context: Context) {
         else VpnGateResult.Success(merged, combined.size - merged.size)
     }
 
-    private suspend fun fetchVpnGateCsv(): String {
-        var lastError: Throwable? = null
-        for (url in vpngateSources) {
-            val sourceHost = url.substringAfter("://").substringBefore("/")
-            try {
-                val response = client.get(url) {
-                    header("User-Agent", "FreeVPN-Android/3.3")
-                    header("Accept", "text/csv,text/plain,*/*")
+    /**
+     * Race the official directory and its mirrors. A slow first endpoint must not
+     * hold up the menu while a mirror is already responding with a valid directory.
+     */
+    private suspend fun fetchVpnGateCsv(): String = supervisorScope {
+        val result = CompletableDeferred<String>()
+        val failed = AtomicInteger(0)
+        val lastError = AtomicReference<Throwable?>(null)
+        val jobs = vpngateSources.map { url ->
+            launch {
+                val sourceHost = url.substringAfter("://").substringBefore("/")
+                try {
+                    val body = fetchVpnGateSource(url, sourceHost)
+                    if (result.complete(body)) {
+                        Log.i(TAG, "VPN Gate directory loaded from $sourceHost")
+                    }
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    lastError.set(e)
+                    Log.w(TAG, "VPN Gate source failed: $sourceHost", e)
+                    if (failed.incrementAndGet() == vpngateSources.size) {
+                        result.completeExceptionally(IOException("All VPN Gate sources failed", lastError.get()))
+                    }
                 }
-                if (response.status.value !in 200..299) {
-                    throw IOException("$sourceHost HTTP ${response.status.value}")
-                }
-                val body = response.bodyAsText()
-                val headerFound = body.lineSequence().any {
-                    it.contains("HostName") && it.contains("OpenVPN_ConfigData_Base64")
-                }
-                val rowFound = body.lineSequence().any {
-                    val line = it.trim()
-                    line.isNotEmpty() && !line.startsWith("*") && !line.startsWith("#") &&
-                        line.count { char -> char == ',' } >= 14
-                }
-                if (!headerFound || !rowFound) throw IOException("$sourceHost invalid CSV")
-                Log.i(TAG, "VPN Gate directory loaded from $sourceHost")
-                return body
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                lastError = e
-                Log.w(TAG, "VPN Gate source failed: $sourceHost", e)
             }
         }
-        throw IOException("All VPN Gate sources failed", lastError)
+
+        try {
+            withTimeoutOrNull(18_000L) { result.await() }
+                ?: throw IOException("VPN Gate mirrors did not respond within 18 seconds", lastError.get())
+        } finally {
+            jobs.forEach { it.cancel() }
+        }
+    }
+
+    private suspend fun fetchVpnGateSource(url: String, sourceHost: String): String {
+        val response = client.get(url) {
+            header("User-Agent", "FreeVPN-Android/3.5")
+            header("Accept", "text/csv,text/plain,*/*")
+        }
+        if (response.status.value !in 200..299) {
+            throw IOException("$sourceHost HTTP ${response.status.value}")
+        }
+        val body = response.bodyAsText()
+        val headerFound = body.lineSequence().any {
+            it.contains("HostName") && it.contains("OpenVPN_ConfigData_Base64")
+        }
+        val rowFound = body.lineSequence().any {
+            val line = it.trim()
+            line.isNotEmpty() && !line.startsWith("*") && !line.startsWith("#") &&
+                line.count { char -> char == ',' } >= 14
+        }
+        if (!headerFound || !rowFound) throw IOException("$sourceHost invalid CSV")
+        return body
     }
 
     /** Keep profiles even if the VPN Gate feed has not measured ping/speed yet. */

@@ -35,9 +35,9 @@ class RegionGeolocationRepository(context: Context) {
 
     private val client = HttpClient(Android) {
         install(HttpTimeout) {
-            connectTimeoutMillis = 6_000
-            socketTimeoutMillis = 7_000
-            requestTimeoutMillis = 9_000
+            connectTimeoutMillis = 3_000
+            socketTimeoutMillis = 3_500
+            requestTimeoutMillis = 4_500
         }
     }
 
